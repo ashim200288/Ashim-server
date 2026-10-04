@@ -1,0 +1,21 @@
+{
+  "name": "art-hub-server",
+  "version": "1.0.0",
+  "description": "ArtHub REST API (Express, MongoDB, Stripe, JWT)",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "seed": "node scripts/seed.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^5.1.0",
+    "google-auth-library": "^9.15.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.9.0",
+    "stripe": "^17.5.0"
+  }
+}
