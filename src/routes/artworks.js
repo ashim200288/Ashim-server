@@ -5,6 +5,8 @@ const Transaction = require('../models/Transaction');
 const User = require('../models/User');
 const { auth, optionalAuth, role } = require('../middleware/auth');
 const { validId } = require('../utils');
+const { embedImage } = require('../services/gemini');
+const { findDuplicates } = require('../services/vectors');
 
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const POP = { path: 'artist', select: 'name avatar' };
@@ -22,7 +24,7 @@ router.get('/', async (req, res) => {
   if (search) {
     const rx = new RegExp(esc(search), 'i');
     const ids = (await User.find({ name: rx, role: 'artist' }).select('_id')).map((u) => u._id);
-    q.$or = [{ title: rx }, { artist: { $in: ids } }];
+    q.$or = [{ title: rx }, { tags: rx }, { artist: { $in: ids } }];
   }
   const sorts = { newest: { createdAt: -1 }, 'price-asc': { price: 1 }, 'price-desc': { price: -1 } };
   const [items, total] = await Promise.all([
@@ -52,14 +54,34 @@ router.get('/:id', async (req, res) => {
   res.json(art);
 });
 
-router.post('/', auth, role('artist'), async (req, res) => {
-  const { title, description, price, category, image } = req.body;
+// Embeds the image and flags near-duplicates. Never blocks or rejects the upload (AI-06, AI-07).
+async function indexArtwork(art) {
   try {
-    const art = await Artwork.create({ title, description, price: +price, category, image, artist: req.user._id });
-    res.status(201).json(art);
+    const vec = await embedImage(art.image);
+    art.embedding = vec;
+    const dups = await findDuplicates(vec, art._id);
+    art.duplicates = dups;
+    art.dupStatus = dups.length ? 'pending' : 'none';
+    await art.save();
+    return true;
   } catch (e) {
-    res.status(400).json({ message: 'Please fill in all fields with valid values' });
+    console.warn('[ai] could not index artwork:', e.message);
+    return false;
   }
+}
+
+const cleanTags = (t) => (Array.isArray(t) ? t : String(t || '').split(',')).map((x) => String(x).trim().toLowerCase()).filter(Boolean).slice(0, 8);
+
+router.post('/', auth, role('artist'), async (req, res) => {
+  const { title, description, price, category, image, tags } = req.body;
+  let art;
+  try {
+    art = await Artwork.create({ title, description, price: +price, category, image, tags: cleanTags(tags), artist: req.user._id });
+  } catch (e) {
+    return res.status(400).json({ message: 'Please fill in all fields with valid values' });
+  }
+  const indexed = await indexArtwork(art);
+  res.status(201).json({ ...art.toJSON(), aiIndexed: indexed, flaggedAsDuplicate: art.dupStatus === 'pending' });
 });
 
 async function ownedOrAdmin(req, res) {
@@ -75,7 +97,10 @@ router.put('/:id', auth, async (req, res) => {
   const art = await ownedOrAdmin(req, res);
   if (!art) return;
   if (String(art.artist) !== String(req.user._id)) return res.status(403).json({ message: 'Only the artist can edit' });
+  const imageChanged = req.body.image !== undefined && req.body.image !== art.image;
   ['title', 'description', 'price', 'category', 'image'].forEach((k) => req.body[k] !== undefined && (art[k] = req.body[k]));
+  if (req.body.tags !== undefined) art.tags = cleanTags(req.body.tags);
+  if (imageChanged) { art.embedding = []; art.duplicates = []; art.duplicateStatus = 'none'; } // re-indexed by the client / admin reindex
   await art.save();
   res.json(art);
 });
